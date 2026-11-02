@@ -22,10 +22,23 @@ spec:
       labels:
         app: churn-api
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
       containers:
         - name: churn-api
-          image: churn-api:162ff82afb7873deecd8c139d95f0394f3edb1b1
+          image: ghcr.io/sadiaawan/miniproj-mobil-churn-laboration:cd0bfebffa86f57b68ed33bc0b4dfd941a2ead90
           imagePullPolicy: IfNotPresent
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
 
           ports:
             - name: http
@@ -34,7 +47,7 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 96Mi
             limits:
               cpu: 500m
               memory: 512Mi
