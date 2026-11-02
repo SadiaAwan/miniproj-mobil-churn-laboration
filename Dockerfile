@@ -22,4 +22,7 @@ ENV PYTHONPATH=/app/src
 COPY data/ ./data/
 COPY outputs/modell.joblib ./outputs/modell.joblib
 
-CMD ["python", "-m", "churn.score"]
+# API:t lyssnar på port 8000 inne i containern.
+EXPOSE 8000
+
+CMD ["uvicorn", "churn.api:app", "--host", "0.0.0.0", "--port", "8000"]
