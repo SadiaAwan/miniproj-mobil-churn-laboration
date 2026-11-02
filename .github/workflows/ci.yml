@@ -382,7 +382,7 @@ jobs:
       contents: read
 
     env:
-      KUBECONFIG: ${{ runner.temp }}/course-kubeconfig.yaml
+      KUBECONFIG: /tmp/course-kubeconfig.yaml
       KUBE_CONTEXT: mlops-ht26
       KUBE_NAMESPACE: sadia-awan
 
