@@ -21,6 +21,7 @@ ENV PYTHONPATH=/app/src
 
 COPY data/ ./data/
 COPY outputs/modell.joblib ./outputs/modell.joblib
+COPY outputs/matvarden.json ./outputs/matvarden.json
 
 # API:t lyssnar på port 8000 inne i containern.
 EXPOSE 8000

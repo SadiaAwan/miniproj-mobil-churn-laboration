@@ -1,5 +1,6 @@
 """API som använder den färdigtränade churnmodellen."""
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,15 +16,31 @@ from churn.data import FEATURES, skapa_features
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ladda modellen en gång när servern startar.
+    # Läs modellen och metadata från samma katalog.
     modellfil = Path(os.environ.get("MODEL_PATH", "outputs/modell.joblib"))
+    metadatafil = modellfil.with_name("matvarden.json")
 
     if not modellfil.is_file():
         raise RuntimeError(f"Modellfilen saknas: {modellfil}")
 
+    if not metadatafil.is_file():
+        raise RuntimeError(f"Modellens metadata saknas: {metadatafil}")
+
+    metadata = json.loads(metadatafil.read_text(encoding="utf-8"))
+    commit = metadata.get("commit")
+
+    if not isinstance(commit, str) or not commit.strip():
+        raise RuntimeError("Modellens metadata saknar en giltig commit")
+
+    # Ladda en gång vid uppstart, inte vid varje anrop.
     app.state.modell = joblib.load(modellfil)
-    yield
-    app.state.modell = None
+    app.state.model_version = commit
+
+    try:
+        yield
+    finally:
+        app.state.modell = None
+        app.state.model_version = None
 
 
 app = FastAPI(title="Saldes churn API", lifespan=lifespan)
@@ -55,6 +72,17 @@ def health(request: Request):
     return {"status": "ok", "model_loaded": True}
 
 
+@app.get("/version")
+def version(request: Request):
+    """Visa vilken commit modellen tränades från."""
+    model_version = getattr(request.app.state, "model_version", None)
+
+    if model_version is None:
+        raise HTTPException(status_code=503, detail="Modellversionen saknas")
+
+    return {"model_version": model_version}
+
+
 @app.post("/predict", response_model=Prognos)
 def predict(kund: Kund, request: Request):
     """Beräkna churnrisk för en kund."""
@@ -63,10 +91,7 @@ def predict(kund: Kund, request: Request):
     if modell is None:
         raise HTTPException(status_code=503, detail="Modellen är inte laddad")
 
-    # Gör kunduppgifterna till en tabell med en rad.
     kunddata = pd.DataFrame([kund.model_dump()])
-
-    # Samma feature-kod som används under träningen.
     features = skapa_features(kunddata)[FEATURES]
 
     risk = float(modell.predict_proba(features)[0, 1])

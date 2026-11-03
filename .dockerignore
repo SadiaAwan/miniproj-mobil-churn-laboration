@@ -31,3 +31,4 @@ models/
 # Updata thet not supose to be included in the images
 outputs/*
 !outputs/modell.joblib
+!outputs/matvarden.json
