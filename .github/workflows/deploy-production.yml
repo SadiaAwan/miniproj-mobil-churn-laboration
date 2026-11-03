@@ -1,0 +1,193 @@
+name: Deploy Production
+
+# Starta efter att CI har avslutats på main.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Kör endast en produktionsdeployment åt gången.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to production
+
+    # Deploya bara efter lyckad CI från en push till main i detta repo.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Behåller ditt manuella produktionsgodkännande.
+    environment:
+      name: production
+
+    env:
+      KUBECONFIG: /tmp/course-kubeconfig.yaml
+      KUBE_CONTEXT: mlops-ht26
+      KUBE_NAMESPACE: sadia-awan
+
+    steps:
+      - name: Checkout approved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+
+          VERSION="v1.36.5"
+          BASE_URL="https://dl.k8s.io/release/$VERSION/bin/linux/amd64"
+
+          curl -fsSL "$BASE_URL/kubectl" -o kubectl
+          curl -fsSL "$BASE_URL/kubectl.sha256" -o kubectl.sha256
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Configure cluster access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$KUBE_CONFIG" ]]; then
+            echo "KUBE_CONFIG secret is missing."
+            exit 1
+          fi
+
+          umask 077
+          printf '%s\n' "$KUBE_CONFIG" > "$KUBECONFIG"
+
+      - name: Deploy approved image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="ghcr.io/${REPOSITORY,,}:$COMMIT_SHA"
+
+          # Använd imagen från exakt den commit som klarade CI.
+          kubectl set image \
+            -f k8s/deployment.yaml \
+            "churn-api=$IMAGE" \
+            --local -o yaml > "$RUNNER_TEMP/deployment.yaml"
+
+          kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+            apply -f k8s/service.yaml
+
+          kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+            apply -f "$RUNNER_TEMP/deployment.yaml"
+
+          kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+            rollout status deployment/churn-api --timeout=300s
+
+          ACTUAL_IMAGE=$(kubectl --context "$KUBE_CONTEXT" \
+            -n "$KUBE_NAMESPACE" get deployment churn-api \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+
+          if [[ "$ACTUAL_IMAGE" != "$IMAGE" ]]; then
+            echo "Deployment image does not match the approved image."
+            exit 1
+          fi
+
+          kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+            get pods -l app=churn-api
+
+          echo "Deployed image: $IMAGE"
+
+          {
+            echo "## Production deployment"
+            echo "Image: $IMAGE"
+            echo "Namespace: $KUBE_NAMESPACE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify health and prediction
+        run: |
+          set -euo pipefail
+
+          kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+            port-forward service/churn-api 8081:80 \
+            > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID" 2>/dev/null || true' EXIT
+
+          python - <<'PY'
+          import json
+          import math
+          import time
+          import urllib.error
+          import urllib.request
+
+          base_url = "http://127.0.0.1:8081"
+
+          for attempt in range(30):
+              try:
+                  with urllib.request.urlopen(
+                      f"{base_url}/health", timeout=5
+                  ) as response:
+                      health = json.load(response)
+
+                  if (
+                      health.get("status") == "ok"
+                      and health.get("model_loaded") is True
+                  ):
+                      break
+              except (urllib.error.URLError, TimeoutError):
+                  pass
+
+              time.sleep(2)
+          else:
+              raise SystemExit("FAIL: Health check did not pass.")
+
+          customer = {
+              "alder": 45,
+              "manader_som_kund": 24,
+              "manadskostnad": 299,
+              "data_gb_per_manad": 15,
+              "supportarenden_12m": 2,
+              "region": "Stockholm",
+              "abonnemang": "Standard",
+          }
+
+          request = urllib.request.Request(
+              f"{base_url}/predict",
+              data=json.dumps(customer).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+
+          with urllib.request.urlopen(request, timeout=10) as response:
+              prediction = json.load(response)
+
+          risk = prediction["risk"]
+
+          if not isinstance(risk, (int, float)) or not math.isfinite(risk):
+              raise SystemExit("FAIL: Risk is not a finite number.")
+
+          if not 0 <= risk <= 1:
+              raise SystemExit("FAIL: Risk is outside 0–1.")
+
+          print("PASS: Health:", health)
+          print("PASS: Prediction:", prediction)
+          PY
+
+      - name: Remove cluster credentials
+        if: always()
+        run: rm -f "$KUBECONFIG"
