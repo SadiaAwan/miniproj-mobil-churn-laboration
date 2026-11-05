@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # Behåller ditt manuella produktionsgodkännande.
+    # Kräver ditt manuella produktionsgodkännande.
     environment:
       name: production
 
@@ -88,12 +88,17 @@ jobs:
             "churn-api=$IMAGE" \
             --local -o yaml > "$RUNNER_TEMP/deployment.yaml"
 
+          # Applicera Service, Deployment och Ingress genom pipelinen.
           kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
             apply -f k8s/service.yaml
 
           kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
             apply -f "$RUNNER_TEMP/deployment.yaml"
 
+          kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+            apply -f k8s/ingress.yaml
+
+          # Vänta tills utrullningen är klar.
           kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
             rollout status deployment/churn-api --timeout=300s
 
@@ -109,12 +114,16 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
             get pods -l app=churn-api
 
+          kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" \
+            get ingress churn-api -o wide
+
           echo "Deployed image: $IMAGE"
 
           {
             echo "## Production deployment"
             echo "Image: $IMAGE"
             echo "Namespace: $KUBE_NAMESPACE"
+            echo "HTTP health URL: http://churn-sadia-awan.89-167-53-206.sslip.io/health"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify health and prediction
